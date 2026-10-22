@@ -7,6 +7,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern struct proc proc[NPROC];
+
 uint64 sys_exit(void) {
   int n;
   if (argint(0, &n) < 0) return -1;
@@ -20,8 +22,9 @@ uint64 sys_fork(void) { return fork(); }
 
 uint64 sys_wait(void) {
   uint64 p;
-  if (argaddr(0, &p) < 0) return -1;
-  return wait(p);
+  int flags;
+  if (argaddr(0, &p) < 0 || argint(1, &flags) < 0) return -1;
+  return wait(p, flags);
 }
 
 uint64 sys_sbrk(void) {
@@ -79,5 +82,43 @@ uint64 sys_rename(void) {
   struct proc *p = myproc();
   memmove(p->name, name, len);
   p->name[len] = '\0';
+  return 0;
+}
+
+uint64 sys_yield(void)
+{
+  struct proc *p = myproc();
+
+  printf("Save the context of the process to the memory region from address %p to %p\n",
+    (uint64)&p->context, (uint64)(&p->context + 1));
+
+  printf("Current running process pid is %d and user pc is %p\n",
+      p->pid, p->trapframe->epc);
+
+  int current = p - proc;
+
+  // 从当前进程的下一槽位开始，绕回数组开头；
+  // 最后检查当前槽位，完整扫描一圈。
+  for(int offset = 1; offset <= NPROC; offset++){
+    struct proc *q = &proc[(current + offset) % NPROC];
+
+    acquire(&q->lock);
+
+    if(q->state == RUNNABLE){
+      int next_pid = q->pid;
+      uint64 next_pc = q->trapframe->epc;
+
+      release(&q->lock);
+
+      printf("Next runnable process pid is %d and user pc is %p\n",
+        next_pid, next_pc);
+
+      break;
+    }
+
+    release(&q->lock);
+  }
+
+  yield();
   return 0;
 }
