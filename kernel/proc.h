@@ -82,6 +82,8 @@ struct trapframe {
 
 enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define SECCOMP_LOG_SIZE 32
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -93,6 +95,18 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+
+  // child_lock protects the count and limit. Never acquire a proc lock
+  // while holding child_lock (reparent already holds parent/child locks).
+  struct spinlock child_lock;
+  int child_count;             // Direct children, including unreaped zombies
+  int max_children;            // NPROC by default; 0 forbids new children
+
+  // Private to the running process; fork inherits the mask, not the log.
+  uint64 seccomp_mask;
+  uint64 seccomp_log[SECCOMP_LOG_SIZE];
+  int seccomp_log_start;       // Oldest entry in the ring
+  int seccomp_log_count;
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack

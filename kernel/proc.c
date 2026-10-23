@@ -28,6 +28,7 @@ void procinit(void) {
   initlock(&pid_lock, "nextpid");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
+    initlock(&p->child_lock, "children");
 
     // Allocate a page for the process's kernel stack.
     // Map it high in memory, followed by an invalid
@@ -96,6 +97,12 @@ static struct proc *allocproc(void) {
 
 found:
   p->pid = allocpid();
+  p->seccomp_mask = ~0UL;
+  memset(p->seccomp_log, 0, sizeof(p->seccomp_log));
+  p->seccomp_log_start = 0;
+  p->seccomp_log_count = 0;
+  p->child_count = 0;
+  p->max_children = NPROC;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -135,6 +142,12 @@ static void freeproc(struct proc *p) {
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->seccomp_mask = ~0UL;
+  memset(p->seccomp_log, 0, sizeof(p->seccomp_log));
+  p->seccomp_log_start = 0;
+  p->seccomp_log_count = 0;
+  p->child_count = 0;
+  p->max_children = NPROC;
   p->state = UNUSED;
 }
 
@@ -230,8 +243,21 @@ int fork(void) {
   struct proc *np;
   struct proc *p = myproc();
 
+  // Reserve a child slot before allocating; roll it back on failure.
+  acquire(&p->child_lock);
+  if (p->child_count >= p->max_children) {
+    release(&p->child_lock);
+    return -1;
+  }
+  p->child_count++;
+  int max_children = p->max_children;
+  release(&p->child_lock);
+
   // Allocate process.
   if ((np = allocproc()) == 0) {
+    acquire(&p->child_lock);
+    p->child_count--;
+    release(&p->child_lock);
     return -1;
   }
 
@@ -239,9 +265,14 @@ int fork(void) {
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
     freeproc(np);
     release(&np->lock);
+    acquire(&p->child_lock);
+    p->child_count--;
+    release(&p->child_lock);
     return -1;
   }
   np->sz = p->sz;
+  np->seccomp_mask = p->seccomp_mask;
+  np->max_children = max_children;
 
   np->parent = p;
 
@@ -282,6 +313,14 @@ void reparent(struct proc *p) {
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
       pp->parent = initproc;
+      // Transfer accounting as well as parentage. Adoption is not fork,
+      // so init must accept orphans even if it has reached its limit.
+      acquire(&p->child_lock);
+      p->child_count--;
+      release(&p->child_lock);
+      acquire(&initproc->child_lock);
+      initproc->child_count++;
+      release(&initproc->child_lock);
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
@@ -421,6 +460,9 @@ int wait(uint64 addr, int flags) {
             return -1;
           }
           freeproc(np);
+          acquire(&p->child_lock);
+          p->child_count--;
+          release(&p->child_lock);
           release(&np->lock);
           release(&p->lock);
           return pid;

@@ -122,3 +122,49 @@ uint64 sys_yield(void)
   yield();
   return 0;
 }
+
+// op 0: replace the allowlist; op 1: set the direct-child limit.
+uint64 sys_seccomp_ctl(void) {
+  int op;
+  uint64 arg;
+  struct proc *p = myproc();
+
+  if (argint(0, &op) < 0 || argaddr(1, &arg) < 0) return -1;
+  switch (op) {
+    case 0:
+      p->seccomp_mask = arg;
+      return 0;
+    case 1:
+      // The stored limit is a nonnegative int; reject overflow/negative casts.
+      if (arg > 0x7fffffffUL) return -1;
+      acquire(&p->child_lock);
+      p->max_children = (int)arg;
+      release(&p->child_lock);
+      return 0;
+    default:
+      return -1;
+  }
+}
+
+// Return a non-destructive snapshot, oldest first. *len is in entries.
+uint64 sys_seccomp_getlog(void) {
+  uint64 buf, lenaddr;
+  int capacity, count;
+  uint64 entries[SECCOMP_LOG_SIZE];
+  struct proc *p = myproc();
+
+  if (argaddr(0, &buf) < 0 || argaddr(1, &lenaddr) < 0) return -1;
+  if (copyin(p->pagetable, (char *)&capacity, lenaddr, sizeof(capacity)) < 0 ||
+      capacity < 0)
+    return -1;
+  count = p->seccomp_log_count;
+  if (count > capacity) count = capacity;
+  for (int i = 0; i < count; i++)
+    entries[i] = p->seccomp_log[(p->seccomp_log_start + i) % SECCOMP_LOG_SIZE];
+
+  if (count > 0 && copyout(p->pagetable, buf, (char *)entries,
+                           count * sizeof(entries[0])) < 0)
+    return -1;
+  if (copyout(p->pagetable, lenaddr, (char *)&count, sizeof(count)) < 0) return -1;
+  return 0;
+}
